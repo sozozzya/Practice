@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Анализ рынка недвижимости</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f9;
+            color: #333;
+            margin: 0;
+            padding: 20px;
+        }
+
+        h1 {
+            text-align: center;
+            color: #2a52be;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        input[type="text"],
+        input[type="file"] {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+
+        button {
+            width: 100%;
+            padding: 10px;
+            background-color: #2a52be;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+
+        button:hover {
+            background-color: #1e3a8a;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            font-size: 14px;
+            color: #666;
+        }
+
+        .uploaded-files {
+            margin-top: 20px;
+        }
+
+        img {
+            max-width: 100%;
+            height: auto;
+            margin-top: 10px;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>Анализ рынка недвижимости</h1>
+
+        <input type="text" id="cityInput" placeholder="Введите название города">
+        <button onclick="fetchRealEstateInfo()">Получить информацию</button>
+        <p class="loading" id="loading">Загрузка...</p>
+        <p id="result"></p>
+        <a id="downloadReport" style="display: none;" download>Скачать отчет</a>
+
+        <h2>Загрузить файлы</h2>
+        <input type="file" id="fileInput" multiple>
+        <button onclick="uploadFiles()">Загрузить</button>
+
+        <div class="uploaded-files" id="uploadedFiles"></div>
+    </div>
+
+    <script>
+        async function fetchRealEstateInfo() {
+            const city = document.getElementById('cityInput').value;
+            const resultElement = document.getElementById('result');
+            const loadingElement = document.getElementById('loading');
+            const downloadLink = document.getElementById('downloadReport');
+
+            if (!city) {
+                alert('Пожалуйста, введите название города!');
+                return;
+            }
+
+            resultElement.innerText = '';
+            downloadLink.style.display = 'none';
+            loadingElement.style.display = 'block';
+
+            try {
+                const response = await fetch('/get_real_estate_info', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ city }),
+                });
+
+                const data = await response.json();
+                loadingElement.style.display = 'none';
+
+                if (response.ok) {
+                    resultElement.innerText = data.info;
+                    downloadLink.href = data.report_url;
+                    downloadLink.innerText = "Скачать отчет";
+                    downloadLink.style.display = "block";
+                } else {
+                    resultElement.innerText = `Ошибка: ${data.error}`;
+                }
+            } catch (error) {
+                loadingElement.style.display = 'none';
+                resultElement.innerText = 'Ошибка при получении данных.';
+            }
+        }
+    </script>
+</body>
+
+</html>
