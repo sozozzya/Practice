@@ -8,128 +8,166 @@
     <style>
         body {
             font-family: Arial, sans-serif;
-            background-color: #f4f4f9;
-            color: #333;
-            margin: 0;
-            padding: 20px;
-        }
-
-        h1 {
-            text-align: center;
-            color: #2a52be;
+            margin: 20px;
+            padding: 0;
+            background-color: #f4f4f4;
         }
 
         .container {
-            max-width: 800px;
+            max-width: 600px;
             margin: 0 auto;
             padding: 20px;
-            background: #fff;
+            background: white;
             border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            box-shadow: 0px 0px 10px rgba(0, 0, 0, 0.1);
         }
 
-        input[type="text"],
-        input[type="file"] {
+        h2 {
+            text-align: center;
+        }
+
+        label {
+            font-weight: bold;
+        }
+
+        input,
+        button {
             width: 100%;
             padding: 10px;
             margin: 10px 0;
             border: 1px solid #ccc;
-            border-radius: 4px;
+            border-radius: 5px;
         }
 
         button {
-            width: 100%;
-            padding: 10px;
-            background-color: #2a52be;
+            background-color: #007bff;
             color: white;
-            border: none;
-            border-radius: 4px;
             cursor: pointer;
             font-size: 16px;
+            border: none;
         }
 
-        button:hover {
-            background-color: #1e3a8a;
+        button:disabled {
+            background-color: #aaa;
+            cursor: not-allowed;
         }
 
-        .loading {
-            display: none;
+        #reportStatus {
             text-align: center;
-            font-size: 14px;
-            color: #666;
+            font-weight: bold;
+            color: #007bff;
         }
 
-        .uploaded-files {
-            margin-top: 20px;
-        }
-
-        img {
-            max-width: 100%;
-            height: auto;
-            margin-top: 10px;
-            border-radius: 4px;
+        #downloadReportBtn {
+            display: none;
         }
     </style>
 </head>
 
 <body>
     <div class="container">
-        <h1>Анализ рынка недвижимости</h1>
+        <h2>Генерация отчета</h2>
 
-        <input type="text" id="cityInput" placeholder="Введите название города">
-        <button onclick="fetchRealEstateInfo()">Получить информацию</button>
-        <p class="loading" id="loading">Загрузка...</p>
-        <p id="result"></p>
-        <a id="downloadReport" style="display: none;" download>Скачать отчет</a>
+        <label for="dataFile">Загрузите таблицу (CSV, Excel):</label>
+        <input type="file" id="dataFile" accept=".csv, .xls, .xlsx">
+        <button id="uploadBtn">Загрузить таблицу</button>
+        <p id="uploadStatus"></p>
 
-        <h2>Загрузить файлы</h2>
-        <input type="file" id="fileInput" multiple>
-        <button onclick="uploadFiles()">Загрузить</button>
+        <label for="cityInput">Введите город:</label>
+        <input type="text" id="cityInput" placeholder="Например, Москва">
 
-        <div class="uploaded-files" id="uploadedFiles"></div>
+        <button id="generateReportBtn" disabled>Создать отчет</button>
+        <p id="reportStatus"></p>
+
+        <button id="downloadReportBtn">Скачать отчет</button>
     </div>
 
     <script>
-        async function fetchRealEstateInfo() {
-            const city = document.getElementById('cityInput').value;
-            const resultElement = document.getElementById('result');
-            const loadingElement = document.getElementById('loading');
-            const downloadLink = document.getElementById('downloadReport');
+        let uploadedData = "";
+        let reportUrl = "";
 
-            if (!city) {
-                alert('Пожалуйста, введите название города!');
+        document.getElementById("uploadBtn").addEventListener("click", function () {
+            let fileInput = document.getElementById("dataFile");
+            let statusText = document.getElementById("uploadStatus");
+            let reportBtn = document.getElementById("generateReportBtn");
+
+            if (!fileInput.files.length) {
+                alert("Выберите файл для загрузки.");
                 return;
             }
 
-            resultElement.innerText = '';
-            downloadLink.style.display = 'none';
-            loadingElement.style.display = 'block';
+            let file = fileInput.files[0];
+            let formData = new FormData();
+            formData.append("file", file);
 
-            try {
-                const response = await fetch('/get_real_estate_info', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({ city }),
+            statusText.textContent = "Загрузка файла...";
+
+            fetch("/upload_data", {
+                method: "POST",
+                body: formData
+            })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        statusText.textContent = "Ошибка загрузки: " + data.error;
+                    } else {
+                        statusText.textContent = "Файл загружен!";
+                        uploadedData = data.data;
+                        reportBtn.disabled = false;
+                    }
+                })
+                .catch(error => {
+                    console.error("Ошибка:", error);
+                    statusText.textContent = "Ошибка загрузки файла.";
                 });
+        });
 
-                const data = await response.json();
-                loadingElement.style.display = 'none';
+        document.getElementById("generateReportBtn").addEventListener("click", function () {
+            let button = this;
+            let statusText = document.getElementById("reportStatus");
+            let city = document.getElementById("cityInput").value;
+            let downloadBtn = document.getElementById("downloadReportBtn");
 
-                if (response.ok) {
-                    resultElement.innerText = data.info;
-                    downloadLink.href = data.report_url;
-                    downloadLink.innerText = "Скачать отчет";
-                    downloadLink.style.display = "block";
-                } else {
-                    resultElement.innerText = `Ошибка: ${data.error}`;
-                }
-            } catch (error) {
-                loadingElement.style.display = 'none';
-                resultElement.innerText = 'Ошибка при получении данных.';
+            if (!city) {
+                alert("Введите название города.");
+                return;
             }
-        }
+
+            statusText.textContent = "Генерация отчета...";
+            button.disabled = true;
+            downloadBtn.style.display = "none";
+
+            fetch("/get_real_estate_info", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ city: city, table_data: uploadedData })
+            })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.report_url) {
+                        reportUrl = data.report_url;
+                        downloadBtn.style.display = "block";
+                        statusText.textContent = "Отчет готов! Вы можете его скачать.";
+                    } else {
+                        alert("Ошибка при генерации отчета.");
+                    }
+                })
+                .catch(error => {
+                    console.error("Ошибка:", error);
+                    alert("Ошибка при генерации отчета.");
+                })
+                .finally(() => {
+                    button.disabled = false;
+                });
+        });
+
+        document.getElementById("downloadReportBtn").addEventListener("click", function () {
+            if (reportUrl) {
+                window.location.href = reportUrl;
+            } else {
+                alert("Отчет еще не создан.");
+            }
+        });
     </script>
 </body>
 
