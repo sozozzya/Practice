@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Анализ рынка недвижимости</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+        }
+
+        .container {
+            max-width: 600px;
+            margin: auto;
+            padding: 20px;
+        }
+
+        input,
+        button {
+            margin: 10px 0;
+            padding: 10px;
+            width: 100%;
+        }
+
+        #status {
+            margin-top: 10px;
+            font-weight: bold;
+            color: blue;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>Генерация отчета о рынке недвижимости</h1>
+        <input type="text" id="city" placeholder="Введите название города">
+
+        <h3>Загрузите JSON-файл с данными</h3>
+        <input type="file" id="json_file" accept=".json">
+
+        
+
+        <button onclick="uploadJSON()">Загрузить JSON</button>
+        <button onclick="generateReport()">Сформировать отчет</button>
+        <button onclick="downloadReport()">Скачать отчет</button>
+
+        <p id="status"></p>
+    </div>
+
+    <script>
+        async function uploadJSON() {
+            const fileInput = document.getElementById("json_file");
+            const status = document.getElementById("status");
+
+            if (!fileInput.files.length) {
+                alert("Выберите JSON-файл!");
+                return;
+            }
+
+            let formData = new FormData();
+            formData.append("file", fileInput.files[0]);
+
+            status.textContent = "Загрузка JSON...";
+            
+            try {
+                let response = await fetch("/upload/", { method: "POST", body: formData });
+                let result = await response.json();
+
+                if (response.ok) {
+                    status.textContent = "JSON загружен!";
+                } else {
+                    throw new Error(result.message || "Ошибка загрузки JSON");
+                }
+            } catch (error) {
+                alert(`Ошибка: ${error.message}`);
+                status.textContent = "Ошибка загрузки JSON!";
+            }
+        }
+
+        async function generateReport() {
+            const city = document.getElementById("city").value.trim();
+            const status = document.getElementById("status");
+
+            if (!city) {
+                alert("Введите название города!");
+                return;
+            }
+
+            status.textContent = "Генерация отчета...";
+
+            let formData = new FormData();
+            formData.append("city", city);
+
+            try {
+                let response = await fetch("/generate_report/", { method: "POST", body: formData });
+                let result = await response.json();
+
+                if (response.ok) {
+                    status.textContent = "Отчет успешно сформирован!";
+                } else {
+                    throw new Error(result.error || "Ошибка генерации отчета");
+                }
+            } catch (error) {
+                alert(`Ошибка: ${error.message}`);
+                status.textContent = "Ошибка при генерации отчета!";
+            }
+        }
+
+        function downloadReport() {
+            const city = document.getElementById("city").value.trim();
+            if (!city) {
+                alert("Введите название города!");
+                return;
+            }
+            window.location.href = `/download_report/?city=${city}`;
+        }
+    </script>
+</body>
+
+</html>
