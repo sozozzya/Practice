@@ -5,7 +5,8 @@ import google.generativeai as genai
 import os
 import json
 from docx import Document
-from docx.shared import Inches
+from docx.shared import Pt, Cm
+from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
 from datetime import datetime
 
 app = FastAPI()
@@ -23,7 +24,6 @@ json_data = {}
 
 @app.post("/upload/")
 async def upload_json(file: UploadFile = File(...)):
-    """Загружает JSON-файл и парсит данные"""
     global json_data
     file_path = os.path.join(UPLOAD_DIR, file.filename)
 
@@ -46,7 +46,6 @@ async def upload_json(file: UploadFile = File(...)):
 
 
 def generate_text_gemini(prompt: str) -> str:
-    """Генерирует текст с помощью модели Gemini"""
     try:
         model = genai.GenerativeModel("gemini-2.0-flash")
         response = model.generate_content(prompt)
@@ -55,14 +54,41 @@ def generate_text_gemini(prompt: str) -> str:
         return f"Ошибка при генерации текста: {str(e)}"
 
 
+def format_text(text, doc):
+    for line in text.split("\n"):
+        paragraph = doc.add_paragraph()
+        run = paragraph.add_run(line)
+
+        if line.startswith("# "):
+            run.bold = True
+            paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+            run.font.size = Pt(14)
+        elif line.startswith("**") and line.endswith("**"):
+            run.bold = True
+            run.font.size = Pt(12)
+        elif line.startswith("*") and line.endswith("*"):
+            run.italic = True
+            run.font.size = Pt(12)
+
+        paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.JUSTIFY
+        paragraph.paragraph_format.space_before = Pt(6)
+        paragraph.paragraph_format.space_after = Pt(6)
+        paragraph.paragraph_format.line_spacing = Pt(14)
+
+
 @app.post("/generate_report/")
 async def generate_report(city: str = Form(...)):
-    """Генерирует отчет о рынке недвижимости на основе JSON-данных"""
     if not json_data:
         raise HTTPException(status_code=400, detail="JSON-файл не загружен. Сначала загрузите данные.")
 
     doc = Document()
-    doc.add_heading(f'Отчет о рынке недвижимости в {city}', level=1)
+
+    sections = doc.sections
+    for section in sections:
+        section.top_margin = Cm(2)
+        section.bottom_margin = Cm(2)
+        section.left_margin = Cm(2)
+        section.right_margin = Cm(2)
 
     current_date = datetime.today().strftime('%d.%m.%Y')
 
@@ -130,19 +156,17 @@ async def generate_report(city: str = Form(...)):
             11.7. Другие выводы"""
     ]
 
-    for i, prompt in enumerate(prompts, 1):
+    for i, prompt in enumerate(prompts):
         text = generate_text_gemini(prompt)
 
-        doc.add_heading(f'Раздел {i}', level=2)
-
-        section_data = json_data.get(list(json_data.keys())[i-1], {})
+        section_data = json_data.get(list(json_data.keys())[i], {})
         image_path = section_data.get("Изображение") if isinstance(section_data, dict) else None
 
         if image_path and os.path.exists(image_path):
-            doc.add_picture(image_path, width=Inches(5.5))
-            doc.add_paragraph(f"Рис. {i}: {os.path.basename(image_path)}")
+            doc.add_picture(image_path, width=Cm(15))
+            doc.add_paragraph(f"Рис. {i + 1}: {os.path.basename(image_path)}").alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
 
-        doc.add_paragraph(text)
+        format_text(text, doc)
 
     report_path = os.path.join(REPORTS_DIR, f"report_{city}.docx")
     doc.save(report_path)
@@ -152,7 +176,6 @@ async def generate_report(city: str = Form(...)):
 
 @app.get("/download_report/")
 async def download_report(city: str):
-    """Отправляет пользователю готовый отчет"""
     report_path = os.path.join(REPORTS_DIR, f"report_{city}.docx")
     if os.path.exists(report_path):
         return FileResponse(report_path, filename=f"report_{city}.docx")
