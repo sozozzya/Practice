@@ -1,71 +1,109 @@
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import google.generativeai as genai
 import os
 import json
 from docx import Document
-from docx.shared import Pt, Inches
+from docx.shared import Pt, Cm, RGBColor, Inches
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from datetime import datetime
 import re
+import base64
+import tempfile
+import os
+from PIL import Image
+from io import BytesIO
 
 app = FastAPI()
-
-# синий цвет
-# выравнивание по ширине
+# как апи, на вход - инпут, на выход - документ
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-UPLOAD_DIR = "uploads"
 REPORTS_DIR = "reports"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
 # genai.configure(api_key="")
 
+json_file_path = "input.json"
 json_data = {}
 
-@app.post("/upload/")
-async def upload_json(file: UploadFile = File(...)):
+
+def load_json_data():
     global json_data
-    file_path = os.path.join(UPLOAD_DIR, file.filename)
+    if not os.path.exists(json_file_path):
+        raise HTTPException(status_code=500, detail="JSON-файл не найден.")
 
-    try:
-        if not file.filename.endswith(".json"):
-            raise HTTPException(status_code=400, detail="Файл должен быть в формате JSON.")
-
-        contents = await file.read()
-        json_data = json.loads(contents.decode("utf-8"))
-
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(json_data, f, ensure_ascii=False, indent=4)
-
-        return {"filename": file.filename, "message": "JSON успешно загружен"}
-
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="Ошибка парсинга JSON. Проверьте содержимое файла.")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка сервера: {str(e)}")
+    with open(json_file_path, "r", encoding="utf-8") as f:
+        json_data = json.load(f)
 
 
-def format_text(paragraph, text):
-    paragraph.paragraph_format.space_after = Pt(0)
+def set_document_styles(doc):
+    sections = doc.sections
+    for section in sections:
+        section.left_margin = Cm(2.5)
+        section.right_margin = Cm(1.5)
+        section.top_margin = Cm(2.0)
+        section.bottom_margin = Cm(2.0)
 
-    if text.startswith("# "):  
-        paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
-        run = paragraph.add_run(text[2:])
-        run.bold = True
-        run.font.size = Pt(16)
-    
-    elif text.startswith("## "):  
-        paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
-        run = paragraph.add_run(text[3:])
-        run.bold = True
-        run.font.size = Pt(14)
-    
-    elif text.startswith("* "):  
-        paragraph.style = "ListBullet"
+    styles = doc.styles
+
+    normal_style = styles["Normal"]
+    normal_style.font.name = "Times New Roman"
+    normal_style.font.size = Pt(12)
+    normal_style.font.color.rgb = RGBColor(30, 30, 147)
+    normal_style.paragraph_format.alignment = WD_PARAGRAPH_ALIGNMENT.JUSTIFY
+    normal_style.paragraph_format.first_line_indent = Cm(1.25)
+    normal_style.paragraph_format.line_spacing = 1.5
+    normal_style.paragraph_format.space_after = Pt(0)
+
+    heading1 = styles["Heading 1"]
+    heading1.font.name = "Times New Roman"
+    heading1.font.size = Pt(16)
+    heading1.font.bold = True
+    heading1.font.color.rgb = RGBColor(30, 30, 147)
+    heading1.paragraph_format.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
+    heading1.paragraph_format.space_after = Pt(24)
+
+    heading2 = styles["Heading 2"]
+    heading2.font.name = "Times New Roman"
+    heading2.font.size = Pt(14)
+    heading2.font.bold = True
+    heading2.font.color.rgb = RGBColor(30, 30, 147)
+    heading2.paragraph_format.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
+    heading2.paragraph_format.space_before = Pt(24)
+    heading2.paragraph_format.space_after = Pt(12)
+
+
+def add_page_numbers(doc):
+    for section in doc.sections:
+        footer = section.footer
+        paragraph = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph(
+        )
+        paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+
+        fldSimple = OxmlElement("w:fldSimple")
+        fldSimple.set(qn("w:instr"), "PAGE")
+
+        run = paragraph.add_run()
+        run._r.append(fldSimple)
+
+
+def format_text(doc, text):
+    text = text.strip()
+    if not text:
+        return
+
+    if text.startswith("# "):
+        paragraph = doc.add_paragraph(text[2:], style="Heading 1")
+
+    elif text.startswith("## "):
+        paragraph = doc.add_paragraph(text[3:], style="Heading 2")
+
+    elif text.startswith("* "):
+        paragraph = doc.add_paragraph(style="ListBullet")
         remaining_text = text[2:]
 
         bold_parts = re.split(r"(\*\*.*?\*\*)", remaining_text)
@@ -77,8 +115,12 @@ def format_text(paragraph, text):
                 run.bold = True
             else:
                 run.text = part
+            run.font.color.rgb = RGBColor(30, 30, 147)
 
     else:
+        paragraph = doc.add_paragraph(style="Normal")
+        paragraph.paragraph_format.space_after = Pt(0)
+        paragraph.paragraph_format.space_before = Pt(0)
         bold_parts = re.split(r"(\*\*.*?\*\*)", text)
 
         for part in bold_parts:
@@ -88,6 +130,34 @@ def format_text(paragraph, text):
                 run.bold = True
             else:
                 run.text = part
+            run.font.color.rgb = RGBColor(30, 30, 147)
+
+
+def decode_image_base64(base64_str):
+    try:
+        if ',' in base64_str:
+            base64_data = base64_str.split(",")[1]
+        else:
+            base64_data = base64_str
+
+        base64_data = base64_data.strip().replace('\n', '').replace('\r', '')
+
+        missing_padding = len(base64_data) % 4
+        if missing_padding:
+            base64_data += '=' * (4 - missing_padding)
+
+        image_data = base64.b64decode(base64_data)
+
+        image = Image.open(BytesIO(image_data))
+        image.load()
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as temp_file:
+            image.save(temp_file, format="PNG")
+            return temp_file.name
+
+    except Exception as e:
+        print(f"[decode_image_base64] Ошибка: {e}")
+        raise ValueError("Ошибка при декодировании изображения из base64")
 
 
 def generate_text_gemini(prompt: str) -> str:
@@ -100,11 +170,16 @@ def generate_text_gemini(prompt: str) -> str:
 
 
 @app.post("/generate_report/")
-async def generate_report(city: str = Form(...)):
-    if not json_data:
-        raise HTTPException(status_code=400, detail="JSON-файл не загружен. Сначала загрузите данные.")
+async def generate_report():
+    load_json_data()
+
+    city = json_data.get("Общие характеристики", {}).get("Город")
+    if not city:
+        raise HTTPException(
+            status_code=500, detail="Город не найден в JSON-файле.")
 
     doc = Document()
+    set_document_styles(doc)
 
     current_date = datetime.today().strftime('%d.%m.%Y')
 
@@ -139,11 +214,11 @@ async def generate_report(city: str = Form(...)):
         f"""Составь подробный отчет по анализу местоположения объекта оценки и ближайшего окружения. Для составления отчета используй следующую структуру (пункты необходимо заключить в "#", а подпункты в "##"):
         # 5. Анализ местоположения объекта оценки. Ближайшее окружение #
             ## 5.1. Территориально-функциональная зона ## (В данном подпункте проанализируй территориально-функциональную зону: {json_data.get('Зона', 'Нет данных')}, в которой находится объект оценки),
-            ## 5.2. Ближайшее окружение ## (В данном подпункте проанализируй данные: {json_data.get('Расстояние до ближайщего объекта, м"', 'Нет данных')} и {json_data.get('Количестов объектов в радиусе 900м', 'Нет данных')}. Опиши их связным текстом),
+            ## 5.2. Ближайшее окружение ## (В данном подпункте проанализируй данные: {json_data.get('Анализ местоположения', 'Нет данных')} и {json_data.get('Количестов объектов в радиусе 900м', 'Нет данных')}. Опиши их связным текстом),
             ## 5.3. Зона местоположения ## (В данном подпункте проанализируй данные: {json_data.get('Рейтинг зоны местонахождения', 'Нет данных')}. Опиши их связным текстом),
             ## Заключение ##""",
 
-        f"""Составь подробный отчет по анализу фактических данных о ценах и арендных ставках в городе {city}. Для этого проанализируй данные : {json_data.get('Удельная арендная ставква, руб./кв.м. (гистограмма)', 'Нет данных')}, {json_data.get('Удельная цена, тыс. руб./кв.м. (гистограмма)', 'Нет данных')}. Опиши их связным текстом. Для составления отчета используй следующую структуру (пункты необходимо заключить в "#", а подпункты в "##"):
+        f"""Составь подробный отчет по анализу фактических данных о ценах и арендных ставках в городе {city}. Для этого проанализируй данные : {json_data.get('Удельная арендная ставка', 'Нет данных')}, {json_data.get('Удельная цена', 'Нет данных')}. Опиши их связным текстом. Для составления отчета используй следующую структуру (пункты необходимо заключить в "#", а подпункты в "##"):
         # 6. Анализ фактических данных о ценах и арендных ставках # """,
 
         f"""Составь подробный отчет по анализу основных факторов, влияющих на цены недвижимости в городе {city}. Укажи достоверные цифры на {current_date} и приведи конкретные примеры. Для анализа использовать публикации только надежных источников. Укажи ссылки на используемые публикации. Для составления отчета используй следующую структуру (пункты необходимо заключить в "#", а подпункты в "##"):
@@ -152,7 +227,7 @@ async def generate_report(city: str = Form(...)):
             ## 7.2. Характер влияния факторов ##
             ## Заключение ##""",
 
-        f"""Составь подробный отчет по анализу предложений на продажу квартир в городе {city}. Для этого проанализируй данные: {json_data.get('Общая площадь кв.м. (гистограмма)', 'Нет данных')}, {json_data.get('Состояние отделки (круговая диаграмма)', 'Нет данных')}, {json_data.get('Количество комнат (круговая диаграмма)', 'Нет данных')}. Опиши их связным текстом. Для составления отчета используй следующую структуру (пункты необходимо заключить в "#", а подпункты в "##"):
+        f"""Составь подробный отчет по анализу предложений на продажу квартир в городе {city}. Для этого проанализируй данные: {json_data.get('Общая площадь', 'Нет данных')}, {json_data.get('Состояние отделки', 'Нет данных')}, {json_data.get('Количество комнат', 'Нет данных')}. Опиши их связным текстом. Для составления отчета используй следующую структуру (пункты необходимо заключить в "#", а подпункты в "##"):
         # 8. Анализ предложений на продажу квартир #""",
 
         f"""Составь подробный отчет по анализу ликвидности квартир в городе {city}. Для составления отчета используй следующую структуру (пункты необходимо заключить в "#", а подпункты в "##"):
@@ -176,21 +251,35 @@ async def generate_report(city: str = Form(...)):
         text = generate_text_gemini(prompt)
         lines = text.split("\n")
 
+        image_inserted = False
+
         for line in lines:
-            paragraph = doc.add_paragraph()
-            format_text(paragraph, line)
+            if line.startswith("#") or line.startswith("##"):
+                format_text(doc, line)
 
-        section_data = json_data.get(list(json_data.keys())[prompts.index(prompt)], {})
-        image_path = section_data.get("Изображение") if isinstance(section_data, dict) else None
+                section_data = json_data.get(list(json_data.keys())[
+                                             prompts.index(prompt)], {})
+                image_path = section_data.get("img_src") if isinstance(
+                    section_data, dict) else None
 
-        if image_path and os.path.exists(image_path):
-            doc.add_picture(image_path, width=Inches(5.5))
-            doc.add_paragraph(f"Рис: {os.path.basename(image_path)}")
+                if image_path and not image_inserted:
+                    try:
+                        decoded_image_path = decode_image_base64(image_path)
+                        doc.add_picture(decoded_image_path, width=Inches(5.5))
+                        doc.add_paragraph(
+                            f"Рис: {os.path.basename(decoded_image_path)}")
+                        image_inserted = True
+                        os.remove(decoded_image_path)
+                    except Exception as e:
+                        print(f"Ошибка вставки изображения: {e}")
+
+            else:
+                format_text(doc, line)
 
     report_path = os.path.join(REPORTS_DIR, f"report_{city}.docx")
     doc.save(report_path)
 
-    return {"report_path": report_path}
+    return {"report_path": report_path, "city": city}
 
 
 @app.get("/download_report/")
