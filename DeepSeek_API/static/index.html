@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Анализ рынка недвижимости</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+        }
+
+        .container {
+            max-width: 600px;
+            margin: auto;
+            padding: 20px;
+        }
+
+        input,
+        button {
+            margin: 10px 0;
+            padding: 10px;
+            width: 100%;
+        }
+
+        #status {
+            margin-top: 10px;
+            font-weight: bold;
+            color: blue;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>Генерация отчета о рынке недвижимости</h1>
+
+        <button onclick="generateReport()">Сформировать отчет</button>
+        <button onclick="downloadReport()">Скачать отчет</button>
+
+        <p id="status"></p>
+    </div>
+
+    <script>
+        async function generateReport() {
+            const status = document.getElementById("status");
+            status.textContent = "Генерация отчета...";
+
+            try {
+                let response = await fetch("/generate_report/", { method: "POST" });
+                let result = await response.json();
+
+                if (response.ok) {
+                    status.textContent = "Отчет успешно сформирован!";
+                    window.city = result.city;
+                } else {
+                    throw new Error(result.error || "Ошибка генерации отчета");
+                }
+            } catch (error) {
+                alert(`Ошибка: ${error.message}`);
+                status.textContent = "Ошибка при генерации отчета!";
+            }
+        }
+
+        function downloadReport() {
+            if (!window.city) {
+                alert("Город не выбран!");
+                return;
+            }
+
+            window.location.href = `/download_report/?city=${window.city}`;
+        }
+    </script>
+</body>
+
+</html>
