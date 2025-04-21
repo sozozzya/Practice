@@ -5,7 +5,6 @@ import google.generativeai as genai
 import os
 import json
 from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt, Cm, RGBColor, Inches
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
 from docx.oxml import OxmlElement
@@ -77,11 +76,14 @@ def set_document_styles(doc):
 
 
 def add_page_numbers(doc):
-    for section in doc.sections:
+    for i, section in enumerate(doc.sections):
+        section.different_first_page_header_footer = True
+
         footer = section.footer
         paragraph = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph(
         )
         paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+        paragraph.paragraph_format.first_line_indent = Cm(0)
 
         fldSimple = OxmlElement("w:fldSimple")
         fldSimple.set(qn("w:instr"), "PAGE")
@@ -89,13 +91,63 @@ def add_page_numbers(doc):
         run = paragraph.add_run()
         run._r.append(fldSimple)
 
+        if i == 0:
+            section.start_page_number = 2
+
+
+def add_title_page(doc):
+    for _ in range(14):
+        doc.add_paragraph()
+
+    paragraph = doc.add_paragraph()
+    paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+    paragraph.paragraph_format.first_line_indent = Cm(0)
+    run = paragraph.add_run(
+        "ИССЛЕДОВАНИЕ РЫНКА В СЕГМЕНТЕ, КОТОРОМУ ПРИНАДЛЕЖИТ ОЦЕНИВАЕМАЯ КВАРТИРА")
+    run.bold = True
+    run.font.size = Pt(16)
+    run.font.name = "Times New Roman"
+
+    for _ in range(14):
+        doc.add_paragraph()
+
+    for text in [f"Нижний Новгород", str(datetime.today().year)]:
+        p = doc.add_paragraph()
+        p.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+        p.paragraph_format.first_line_indent = Cm(0)
+        run = p.add_run(text)
+        run.font.size = Pt(14)
+        run.font.name = "Times New Roman"
+
+
+def add_table_of_contents(doc):
+    paragraph = doc.add_paragraph()
+    paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+    paragraph.paragraph_format.first_line_indent = Cm(0)
+    run = paragraph.add_run("Содержание")
+    run.font.name = "Times New Roman"
+    run.font.size = Pt(16)
+    run.bold = True
+
+    paragraph = doc.add_paragraph()
+    run = paragraph.add_run()
+    fldSimple = OxmlElement("w:fldSimple")
+    fldSimple.set(qn("w:instr"), 'TOC \\o "1-2" \\h \\z \\u')
+    run._r.append(fldSimple)
+
 
 def format_text(doc, text):
     text = text.strip()
     if not text:
         return
 
-    if text.startswith("* "):
+    if text.startswith("# "):
+        paragraph = doc.add_paragraph(text[2:], style="Heading 1")
+
+    elif text.startswith("## "):
+        paragraph = doc.add_paragraph(text[3:], style="Heading 2")
+
+    elif text.startswith("* "):
         paragraph = doc.add_paragraph(style="ListBullet")
         remaining_text = text[2:]
 
@@ -153,6 +205,35 @@ def decode_image_base64(base64_str):
         raise ValueError("Ошибка при декодировании изображения из base64")
 
 
+def insert_image(doc, img_src):
+    try:
+        image_path = decode_image_base64(img_src)
+
+        with Image.open(image_path) as img:
+            max_width = Inches(5)
+            max_height = Inches(5)
+
+            img_width, img_height = img.size
+            aspect_ratio = img_width / img_height
+
+            width = max_width
+            height = max_width / aspect_ratio
+
+            if height > max_height:
+                height = max_height
+                width = max_height * aspect_ratio
+
+        paragraph = doc.add_paragraph()
+        paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+        run = paragraph.add_run()
+        run.add_picture(image_path, width=width, height=height)
+
+        os.remove(image_path)
+
+    except Exception as e:
+        print(f"Ошибка вставки изображения: {e}")
+
+
 def generate_text_gemini(prompt: str) -> str:
     try:
         model = genai.GenerativeModel("gemini-2.0-flash")
@@ -173,6 +254,9 @@ async def generate_report():
 
     doc = Document()
     set_document_styles(doc)
+    add_title_page(doc)
+    add_table_of_contents(doc)
+    add_page_numbers(doc)
 
     current_date = datetime.now().strftime("%d.%m.%Y")
 
@@ -348,43 +432,33 @@ async def generate_report():
 
     for section in report_structure:
         if "prompt" in section:
+            doc.add_page_break()
             format_text(doc, f"# {section['title']}")
+
+            source = section.get("source", {})
+            if isinstance(source, dict) and "img_src" in source:
+                insert_image(doc, source["img_src"])
 
             prompt = section["prompt"]
             text = generate_text_gemini(prompt)
-
             for line in text.split("\n"):
                 format_text(doc, line)
 
         if "subsections" in section:
+            doc.add_page_break()
             format_text(doc, f"# {section['title']}")
             for sub in section["subsections"]:
                 format_text(doc, f"## {sub['title']}")
 
                 source = sub.get("source", {})
                 if isinstance(source, dict) and "img_src" in source:
-                    try:
-                        image_path = decode_image_base64(source["img_src"])
-
-                        paragraph = doc.add_paragraph()
-                        run = paragraph.add_run()
-                        run.add_picture(image_path, width=Inches(5.5))
-                        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-                        caption = doc.add_paragraph(f"Рис: {sub['title']}")
-                        caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-                        os.remove(image_path)
-                    except Exception as e:
-                        print(f"Ошибка вставки изображения: {e}")
+                    insert_image(doc, source["img_src"])
 
                 prompt = sub["prompt"]
                 text = generate_text_gemini(prompt)
-
                 for line in text.split("\n"):
                     format_text(doc, line)
 
-    add_page_numbers(doc)
     report_path = os.path.join(REPORTS_DIR, f"report_{city}.docx")
     doc.save(report_path)
     return {"report_path": report_path, "city": city}
