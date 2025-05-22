@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import google.generativeai as genai
@@ -15,6 +15,10 @@ import base64
 import tempfile
 from PIL import Image
 from io import BytesIO
+from dotenv import load_dotenv
+import win32com.client as win32
+
+load_dotenv()
 
 app = FastAPI()
 
@@ -23,19 +27,30 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 REPORTS_DIR = "reports"
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
-# genai.configure(api_key="")
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-json_file_path = "input.json"
-json_data = {}
+# json_data = {}
+
+# @app.post("/upload_input_json")
+# async def upload_input_json(request: Request):
+#     global json_data
+#     try:
+#         json_data = await request.json()
+#     except Exception:
+#         raise HTTPException(status_code=400, detail="Ошибка при чтении JSON.")
+
+#     return {"message": "JSON успешно загружен в память."}
 
 
-def load_json_data():
-    global json_data
-    if not os.path.exists(json_file_path):
-        raise HTTPException(status_code=500, detail="JSON-файл не найден.")
+def load_json_file(path: str) -> dict:
+    if not os.path.exists(path):
+        raise HTTPException(status_code=500, detail=f"Файл {path} не найден.")
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-    with open(json_file_path, "r", encoding="utf-8") as f:
-        json_data = json.load(f)
+
+json_data = load_json_file("input.json")
+report_structure = load_json_file("report_structure.json")
 
 
 def set_document_styles(doc):
@@ -59,7 +74,7 @@ def set_document_styles(doc):
 
     heading1 = styles["Heading 1"]
     heading1.font.name = "Times New Roman"
-    heading1.font.size = Pt(16)
+    heading1.font.size = Pt(18)
     heading1.font.bold = True
     heading1.font.color.rgb = RGBColor(30, 30, 147)
     heading1.paragraph_format.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
@@ -67,7 +82,7 @@ def set_document_styles(doc):
 
     heading2 = styles["Heading 2"]
     heading2.font.name = "Times New Roman"
-    heading2.font.size = Pt(14)
+    heading2.font.size = Pt(16)
     heading2.font.bold = True
     heading2.font.color.rgb = RGBColor(30, 30, 147)
     heading2.paragraph_format.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
@@ -178,6 +193,88 @@ def format_text(doc, text):
             run.font.color.rgb = RGBColor(30, 30, 147)
 
 
+def add_macro_to_doc(docx_path):
+    abs_path = os.path.abspath(docx_path)
+
+    word = win32.gencache.EnsureDispatch('Word.Application')
+    word.Visible = False
+
+    doc = word.Documents.Open(abs_path)
+
+    vb_module = doc.VBProject.VBComponents.Add(1)
+    vb_module.CodeModule.AddFromString('''
+Sub AutoOpen()
+    Dim toc As TableOfContents
+    For Each toc In ActiveDocument.TablesOfContents
+        toc.Update
+    Next toc
+
+    Dim inlineShp As InlineShape
+    For Each inlineShp In ActiveDocument.InlineShapes
+        inlineShp.ConvertToShape
+    Next inlineShp
+
+    Dim shp As Shape
+    For Each shp In ActiveDocument.Shapes
+        With shp
+            .WrapFormat.Type = wdWrapSquare
+            .Left = wdShapeLeft
+            .RelativeHorizontalPosition = wdRelativeHorizontalPositionMargin
+            .Top = wdShapeTop
+            .RelativeVerticalPosition = wdRelativeVerticalPositionParagraph
+            .WrapFormat.DistanceRight = CentimetersToPoints(0.3)
+            .WrapFormat.Side = wdWrapRight
+            .WrapFormat.AllowOverlap = False
+        End With
+    Next shp
+End Sub
+''')
+
+    macro_path = abs_path.replace(".docx", ".docm")
+    doc.SaveAs(macro_path, FileFormat=13)
+
+    doc.Close()
+    word.Quit()
+
+    return macro_path
+
+
+def extract_data_by_path(data_dict, path_list):
+    try:
+        for key in path_list:
+            data_dict = data_dict[key]
+        return data_dict
+    except Exception as e:
+        print(f"[extract_data_by_path] Ошибка: {e}")
+        return "Нет данных"
+
+
+def insert_section(doc, title, level, prompt, source_path=None, page_break=False):
+    if page_break:
+        doc.add_page_break()
+
+    if level == 1:
+        format_text(doc, f"# {title}")
+    elif level == 2:
+        format_text(doc, f"## {title}")
+
+    data = extract_data_by_path(json_data, source_path) if source_path else ""
+
+    if isinstance(data, dict) and "img_src" in data:
+        insert_image(doc, data["img_src"])
+
+    prompt_filled = prompt.format(
+        city=json_data.get("Общие характеристики", {}).get("Город", "Город"),
+        current_date=datetime.now().strftime("%d.%m.%Y"),
+        current_year=datetime.now().year,
+        data=data
+    )
+
+    text = generate_text_gemini(prompt_filled)
+    for line in text.split("\n"):
+        format_text(doc, line)
+
+
 def decode_image_base64(base64_str):
     try:
         if ',' in base64_str:
@@ -210,23 +307,29 @@ def insert_image(doc, img_src):
         image_path = decode_image_base64(img_src)
 
         with Image.open(image_path) as img:
-            max_width = Inches(5)
-            max_height = Inches(5)
+            max_width_in = 5
+            max_height_in = 5
 
-            img_width, img_height = img.size
-            aspect_ratio = img_width / img_height
+            img_width_px, img_height_px = img.size
+            aspect_ratio = img_width_px / img_height_px
 
-            width = max_width
-            height = max_width / aspect_ratio
+            width_in = max_width_in
+            height_in = max_width_in / aspect_ratio
 
-            if height > max_height:
-                height = max_height
-                width = max_height * aspect_ratio
+            if height_in > max_height_in:
+                height_in = max_height_in
+                width_in = max_height_in * aspect_ratio
 
         paragraph = doc.add_paragraph()
-        paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+        paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
+        paragraph.paragraph_format.left_indent = Cm(0)
+        paragraph.paragraph_format.right_indent = Cm(0)
+        paragraph.paragraph_format.space_before = Pt(0)
+        paragraph.paragraph_format.space_after = Pt(0)
+
         run = paragraph.add_run()
-        run.add_picture(image_path, width=width, height=height)
+        run.add_picture(image_path, width=Inches(
+            width_in), height=Inches(height_in))
 
         os.remove(image_path)
 
@@ -245,7 +348,9 @@ def generate_text_gemini(prompt: str) -> str:
 
 @app.post("/generate_report")
 async def generate_report():
-    load_json_data()
+    global json_data
+    json_data = load_json_file("input.json")
+    report_structure = load_json_file("report_structure.json")
 
     city = json_data.get("Общие характеристики", {}).get("Город")
     if not city:
@@ -258,217 +363,38 @@ async def generate_report():
     add_table_of_contents(doc)
     add_page_numbers(doc)
 
-    current_date = datetime.now().strftime("%d.%m.%Y")
-
-    report_structure = [
-        {
-            "title": "1. Анализ влияния общей политической и социально-экономической обстановки в России на рынок продажи и аренды недвижимости, в том числе тенденций, наметившихся на рынке за 2024 год",
-            "prompt": f"Составь подробный отчет по анализу влияния общей политической и социально-экономической обстановки в России на рынок недвижимости. Укажи достоверные цифры на {current_date} и приведи конкретные примеры. Для анализа использовать публикации только надежных источников. Укажи ссылки на используемые публикации."
-        },
-        {
-            "title": "2. Анализ влияния общей политической и социально-экономической обстановки в городе Нижний Новгород на рынок продажи и аренды недвижимости, в том числе тенденций, наметившихся на рынке за 2024 год",
-            "prompt": f"Составь подробный отчет по анализу влияния общей политической и социально-экономической обстановки в городе {city} на рынок недвижимости. Укажи достоверные цифры на {current_date} и приведи конкретные примеры. Для анализа использовать публикации только надежных источников. Укажи ссылки на используемые публикации."
-        },
-        {
-            "title": "3. Объект оценки",
-            "subsections": [
-                {
-                    "title": "3.1. Общие сведения",
-                    "prompt": f"Составь подробный отчет по анализу общих сведений об объекте оценки. Для этого проанализируй данные: {json_data.get('Общие сведения', 'Нет данных')}. Опиши их связным текстом.",
-                    "source": json_data.get('Общие сведения', 'Нет данных')
-                },
-                {
-                    "title": "3.2. Общие характеристики",
-                    "prompt": f"Составь подробный отчет по анализу общих характеристик объекта оценки. Для этого проанализируй данные: {json_data.get('Общие характеристики', 'Нет данных')}. Опиши их связным текстом.",
-                    "source": json_data.get('Общие характеристики', 'Нет данных')
-                },
-                {
-                    "title": "3.3. Характеристики здания",
-                    "prompt": f"Составь подробный отчет по анализу общих характеристик здания, в котором находится объект оценки. Для этого проанализируй данные: {json_data.get('Характеристики здания', 'Нет данных')}. Опиши их связным текстом.",
-                    "source": json_data.get('Характеристики здания', 'Нет данных')
-                }
-            ]
-        },
-        {
-            "title": "4. Анализ местоположения объекта оценки",
-            "subsections": [
-                {
-                    "title": "4.1. Территориально функциональная зона",
-                    "prompt": f"Составь подробный отчет по анализу территориально-функциональной зоны, в котором находится объект оценки. Для этого проанализируй данные: {json_data.get('Зона', 'Нет данных')}. Опиши их связным текстом.",
-                    "source": json_data.get('Зона', 'Нет данных')
-                },
-                {
-                    "title": "4.2. Рейтинг зоны местонахождения",
-                    "prompt": f"Составь подробный отчет по анализу рейтинга территориально-функциональной зоны, в котором находится объект оценки. Для этого проанализируй данные: {json_data.get('Рейтинг зоны местонахождения', 'Нет данных')}. Опиши их связным текстом.",
-                    "source": json_data.get('Рейтинг зоны местонахождения', 'Нет данных')
-                },
-                {
-                    "title": "4.3. Ближайшее окружение",
-                    "prompt": f"Составь подробный отчет по анализу ближайшего окружения объекта оценки. Для этого проанализируй данные: {json_data.get('Анализ местоположения', 'Нет данных')}. Опиши их связным текстом.",
-                    "source": json_data.get('Анализ местоположения', 'Нет данных')
-                }
-            ]
-        },
-        {
-            "title": "5. Анализ фактических данных о ценах, предложений и арендных ставок с объектами из сегмента рынка, к которому может быть оцениваемый объект",
-            "subsections": [
-                {
-                    "title": "5.1. Фактические данные",
-                    "prompt": f"Составь подробный отчет по анализу фактических данных о ценах и арендных ставках в городе {city}. Для этого проанализируй данные: {json_data.get('Анализ рынка', {}).get('Фактические данные', 'Нет данных')}. Опиши их связным текстом.",
-                    "source": json_data.get('Анализ рынка', {}).get('Фактические данные', 'Нет данных')
-                },
-                {
-                    "title": "5.2. Удельная цена",
-                    "prompt": f"Составь подробный отчет по анализу удельной цены квартир в городе {city}. Для этого проанализируй данные: {json_data.get('Анализ рынка', {}).get('Удельная цена', 'Нет данных')}. Опиши их связным текстом.",
-                    "source": json_data.get('Анализ рынка', {}).get('Удельная цена', 'Нет данных')
-                },
-                {
-                    "title": "5.3. Удельная арендная ставка",
-                    "prompt": f"Составь подробный отчет по анализу удельной арендной ставки на квартиры в городе {city}. Для этого проанализируй данные: {json_data.get('Анализ рынка', {}).get('Удельная арендная ставка', 'Нет данных')}. Опиши их связным текстом.",
-                    "source": json_data.get('Анализ рынка', {}).get('Удельная арендная ставка', 'Нет данных')
-                },
-                {
-                    "title": "5.4. Общая площадь",
-                    "prompt": f"Составь подробный отчет по анализу общей площади квартир в городе {city}. Для этого проанализируй данные: {json_data.get('Анализ рынка', {}).get('Общая площадь', 'Нет данных')}. Опиши их связным текстом.",
-                    "source": json_data.get('Анализ рынка', {}).get('Общая площадь', 'Нет данных')
-                },
-                {
-                    "title": "5.5. Состояние отделки",
-                    "prompt": f"Составь подробный отчет по анализу состояния отделки квартир в городе {city}. Для этого проанализируй данные: {json_data.get('Анализ рынка', {}).get('Состояние отделки', 'Нет данных')}. Опиши их связным текстом.",
-                    "source": json_data.get('Анализ рынка', {}).get('Состояние отделки', 'Нет данных')
-                },
-                {
-                    "title": "5.6. Количество комнат",
-                    "prompt": f"Составь подробный отчет по анализу количества комнат в квартирах в городе {city}. Для этого проанализируй данные: {json_data.get('Анализ рынка', {}).get('Количество комнат', 'Нет данных')}. Опиши их связным текстом.",
-                    "source": json_data.get('Анализ рынка', {}).get('Количество комнат', 'Нет данных')
-                },
-                {
-                    "title": "5.7. Количество просмотров",
-                    "prompt": f"Составь подробный отчет по анализу количества просмотров на квартиры в городе {city}. Для этого проанализируй данные: {json_data.get('Анализ рынка', {}).get('Количество просмотров', 'Нет данных')}. Опиши их связным текстом.",
-                    "source": json_data.get('Анализ рынка', {}).get('Количество просмотров', 'Нет данных')
-                }
-            ]
-        },
-        {
-            "title": "6. Динамика рынка",
-            "subsections": [
-                {
-                    "title": "6.1. Усредненные показатели за год",
-                    "prompt": f"Составь подробный отчет по анализу усредненных показателей за год динамики рынка квартир в городе {city}. Для этого проанализируй данные: {json_data.get('Динамика рынка', {}).get('Усредненные показатели за год', 'Нет данных')}. Опиши их связным текстом.",
-                    "source": json_data.get('Динамика рынка', {}).get('Усредненные показатели за год', 'Нет данных')
-                },
-                {
-                    "title": "6.2. Динамика средней удельной цены",
-                    "prompt": f"Составь подробный отчет по анализу динамики средней удельной цены квартир в городе {city}. Для этого проанализируй данные: {json_data.get('Динамика рынка', {}).get('Удельная цена', 'Нет данных')}. Опиши их связным текстом.",
-                    "source": json_data.get('Динамика рынка', {}).get('Удельная цена', 'Нет данных')
-                },
-                {
-                    "title": "6.3. Динамика средней удельной арендной ставки",
-                    "prompt": f"Составь подробный отчет по анализу динамики средней удельной арендной ставки на квартиры в городе {city}. Для этого проанализируй данные: {json_data.get('Динамика рынка', {}).get('Удельная арендная ставка', 'Нет данных')}. Опиши их связным текстом.",
-                    "source": json_data.get('Динамика рынка', {}).get('Удельная арендная ставка', 'Нет данных')
-                },
-                {
-                    "title": "6.4. Динамика валового мультипликатора",
-                    "prompt": f"Составь подробный отчет по анализу динамики валового мультипликатора в городе {city}. Для этого проанализируй данные: {json_data.get('Динамика рынка', {}).get('Валовый мультипликатор', 'Нет данных')}. Опиши их связным текстом.",
-                    "source": json_data.get('Динамика рынка', {}).get('Валовый мультипликатор', 'Нет данных')
-                },
-                {
-                    "title": "6.5. Динамика доходности",
-                    "prompt": f"Составь подробный отчет по анализу доходности в городе {city}. Для этого проанализируй данные: {json_data.get('Динамика рынка', {}).get('Доходность', 'Нет данных')}. Опиши их связным текстом».",
-                    "source": json_data.get('Динамика рынка', {}).get('Доходность', 'Нет данных')
-                }
-            ]
-        },
-        {
-            "title": "7. Анализ основных факторов, влияющих на цены и (или) арендные ставки сопоставимых с оцениваемым объектов недвижимости",
-            "prompt": f"Составь подробный отчет по анализу основных факторов, влияющих на цены недвижимости в городе {city}. Укажи достоверные цифры на {current_date} и приведи конкретные примеры. Для анализа использовать публикации только надежных источников. Укажи ссылки на используемые публикации."
-        },
-        {
-            "title": "8. Анализ активности продавцов",
-            "subsections": [
-                {
-                    "title": "8.1. Количество объектов, выставленных на продажу и актуальных на начало наблюдений",
-                    "prompt": f"Составь подробный отчет по анализу количества объектов, выставленных на продажу и актуальных на начало наблюдений, в городе {city}. Для этого проанализируй данные: {json_data.get('Анализ активности продавцов', {}).get('n1_n2', 'Нет данных')}. Опиши их связным текстом.",
-                    "source": json_data.get('Анализ активности продавцов', {}).get('n1_n2', 'Нет данных')
-                },
-                {
-                    "title": "8.2. Количество объектов, выставленных на продажу и вновь появившихся в периоде",
-                    "prompt": f"Составь подробный отчет по анализу количества объектов, выставленных на продажу и и вновь появившихся в периоде, в городе {city}. Для этого проанализируй данные: {json_data.get('Анализ активности продавцов', {}).get('n3_n4', 'Нет данных')}. Опиши их связным текстом.",
-                    "source": json_data.get('Анализ активности продавцов', {}).get('n3_n4', 'Нет данных')
-                },
-                {
-                    "title": "8.3. Активность продавцов в периоде",
-                    "prompt": f"Составь подробный отчет по анализу активности продавцов в периоде (отношение новых объявлений к актуальным на начала периода (n/N₀)) в городе {city}. Для этого проанализируй данные: {json_data.get('Анализ активности продавцов', {}).get('a', 'Нет данных')}. Опиши их связным текстом.",
-                    "source": json_data.get('Анализ активности продавцов', {}).get('a', 'Нет данных')
-                },
-                {
-                    "title": "8.4. Активность покупателей в периоде",
-                    "prompt": f"Составь подробный отчет по анализу активности покупателей в периоде (отношение снятых объявлений к актуальным на начало периода(m/N₀)) в городе {city}. Для этого проанализируй данные: {json_data.get('Анализ активности продавцов', {}).get('m_', 'Нет данных')}. Опиши их связным текстом.",
-                    "source": json_data.get('Анализ активности продавцов', {}).get('m_', 'Нет данных')
-                },
-                {
-                    "title": "8.5. Среднее количество просмотров у данных, выставленных на продажу и вновь появившихся",
-                    "prompt": f"Составь подробный отчет по анализу среднего количества просмотров у данных, выставленных на продажу и вновь появившихся в городе {city}. Для этого проанализируй данные: {json_data.get('Анализ активности продавцов', {}).get('p3_p4_mean', 'Нет данных')}. Опиши их связным текстом.",
-                    "source": json_data.get('Анализ активности продавцов', {}).get('p3_p4_mean', 'Нет данных')
-                },
-                {
-                    "title": "8.6. Интенсивность продаж данных, выставленных на продажу и актуальных на начало наблюдений",
-                    "prompt": f"Составь подробный отчет по анализу интенсивности продаж данных, выставленных на продажу и актуальных на начало наблюдений в городе {city}. Для этого проанализируй данные: {json_data.get('Анализ активности продавцов', {}).get('t1', 'Нет данных')}. Опиши их связным текстом.",
-                    "source": json_data.get('Анализ активности продавцов', {}).get('t1', 'Нет данных')
-                },
-                {
-                    "title": "8.7. Интенсивность продаж данных, выставленных на продажу и вновь появившихся",
-                    "prompt": f"Составь подробный отчет по анализу интенсивности продаж данных, выставленных на продажу и вновь появившихся в городе {city}. Для этого проанализируй данные: {json_data.get('Анализ активности продавцов', {}).get('t2', 'Нет данных')}. Опиши их связным текстом.",
-                    "source": json_data.get('Анализ активности продавцов', {}).get('t2', 'Нет данных')
-                }
-            ]
-        },
-        {
-            "title": "9. INF-оценкка",
-            "prompt": f"«Составь подробный отчет об оценке квартиры. Для этого проанализируй данные: {json_data.get('INF-Оценка', 'Нет данных')}. Опиши их связным текстом.",
-            "source": json_data.get('INF-Оценка', 'Нет данных')
-        }
-    ]
-
     for section in report_structure:
-        if "prompt" in section:
-            doc.add_page_break()
-            format_text(doc, f"# {section['title']}")
+        insert_section(
+            doc,
+            title=section["title"],
+            level=1,
+            prompt=section.get("prompt", ""),
+            source_path=section.get("source"),
+            page_break=True
+        )
 
-            source = section.get("source", {})
-            if isinstance(source, dict) and "img_src" in source:
-                insert_image(doc, source["img_src"])
-
-            prompt = section["prompt"]
-            text = generate_text_gemini(prompt)
-            for line in text.split("\n"):
-                format_text(doc, line)
-
-        if "subsections" in section:
-            doc.add_page_break()
-            format_text(doc, f"# {section['title']}")
-            for sub in section["subsections"]:
-                format_text(doc, f"## {sub['title']}")
-
-                source = sub.get("source", {})
-                if isinstance(source, dict) and "img_src" in source:
-                    insert_image(doc, source["img_src"])
-
-                prompt = sub["prompt"]
-                text = generate_text_gemini(prompt)
-                for line in text.split("\n"):
-                    format_text(doc, line)
+        for sub in section.get("subsections", []):
+            insert_section(
+                doc,
+                title=sub["title"],
+                level=2,
+                prompt=sub["prompt"],
+                source_path=sub.get("source"),
+                page_break=False
+            )
 
     report_path = os.path.join(REPORTS_DIR, f"report_{city}.docx")
     doc.save(report_path)
-    return {"report_path": report_path, "city": city}
+    macro_report_path = add_macro_to_doc(report_path)
+
+    return {"report_path": macro_report_path, "city": city}
 
 
 @app.get("/download_report/")
 async def download_report(city: str):
-    report_path = os.path.join(REPORTS_DIR, f"report_{city}.docx")
+    report_path = os.path.join(REPORTS_DIR, f"Отчет_{city}.docm")
     if os.path.exists(report_path):
-        return FileResponse(report_path, filename=f"report_{city}.docx")
+        return FileResponse(report_path, filename=f"Отчет_{city}.docm")
     raise HTTPException(status_code=404, detail="Отчет не найден")
 
 
