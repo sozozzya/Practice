@@ -1,26 +1,35 @@
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-import google.generativeai as genai
 import os
+import re
 import json
+import time
+import base64
+import tempfile
+import asyncio
+from io import BytesIO
+from datetime import datetime
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from dotenv import load_dotenv
+from PIL import Image
+import google.generativeai as genai
+import win32com.client as win32
+
 from docx import Document
 from docx.shared import Pt, Cm, RGBColor, Inches
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from datetime import datetime
-import re
-import base64
-import tempfile
-from PIL import Image
-from io import BytesIO
-from dotenv import load_dotenv
-import win32com.client as win32
 
 load_dotenv()
 
 app = FastAPI()
+
+REQUESTS_PER_MINUTE = 60
+semaphore = asyncio.Semaphore(REQUESTS_PER_MINUTE)
+last_request_time = 0
+MIN_INTERVAL = 60.0 / REQUESTS_PER_MINUTE
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -29,28 +38,12 @@ os.makedirs(REPORTS_DIR, exist_ok=True)
 
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-# json_data = {}
-
-# @app.post("/upload_input_json")
-# async def upload_input_json(request: Request):
-#     global json_data
-#     try:
-#         json_data = await request.json()
-#     except Exception:
-#         raise HTTPException(status_code=400, detail="Ошибка при чтении JSON.")
-
-#     return {"message": "JSON успешно загружен в память."}
-
 
 def load_json_file(path: str) -> dict:
     if not os.path.exists(path):
         raise HTTPException(status_code=500, detail=f"Файл {path} не найден.")
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
-
-
-json_data = load_json_file("input.json")
-report_structure = load_json_file("report_structure.json")
 
 
 def set_document_styles(doc):
@@ -66,7 +59,7 @@ def set_document_styles(doc):
     normal_style = styles["Normal"]
     normal_style.font.name = "Times New Roman"
     normal_style.font.size = Pt(12)
-    normal_style.font.color.rgb = RGBColor(30, 30, 147)
+    normal_style.font.color.rgb = RGBColor(39, 43, 103)
     normal_style.paragraph_format.alignment = WD_PARAGRAPH_ALIGNMENT.JUSTIFY
     normal_style.paragraph_format.first_line_indent = Cm(1.25)
     normal_style.paragraph_format.line_spacing = 1.5
@@ -76,7 +69,7 @@ def set_document_styles(doc):
     heading1.font.name = "Times New Roman"
     heading1.font.size = Pt(18)
     heading1.font.bold = True
-    heading1.font.color.rgb = RGBColor(30, 30, 147)
+    heading1.font.color.rgb = RGBColor(39, 43, 103)
     heading1.paragraph_format.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
     heading1.paragraph_format.space_after = Pt(24)
 
@@ -84,7 +77,7 @@ def set_document_styles(doc):
     heading2.font.name = "Times New Roman"
     heading2.font.size = Pt(16)
     heading2.font.bold = True
-    heading2.font.color.rgb = RGBColor(30, 30, 147)
+    heading2.font.color.rgb = RGBColor(39, 43, 103)
     heading2.paragraph_format.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
     heading2.paragraph_format.space_before = Pt(24)
     heading2.paragraph_format.space_after = Pt(12)
@@ -175,7 +168,7 @@ def format_text(doc, text):
                 run.bold = True
             else:
                 run.text = part
-            run.font.color.rgb = RGBColor(30, 30, 147)
+            run.font.color.rgb = RGBColor(39, 43, 103)
 
     else:
         paragraph = doc.add_paragraph(style="Normal")
@@ -190,7 +183,7 @@ def format_text(doc, text):
                 run.bold = True
             else:
                 run.text = part
-            run.font.color.rgb = RGBColor(30, 30, 147)
+            run.font.color.rgb = RGBColor(39, 43, 103)
 
 
 def add_macro_to_doc(docx_path):
@@ -222,7 +215,8 @@ Sub AutoOpen()
             .RelativeHorizontalPosition = wdRelativeHorizontalPositionMargin
             .Top = wdShapeTop
             .RelativeVerticalPosition = wdRelativeVerticalPositionParagraph
-            .WrapFormat.DistanceRight = CentimetersToPoints(0.3)
+            .WrapFormat.DistanceRight = CentimetersToPoints(0.5)
+            .WrapFormat.DistanceBottom = CentimetersToPoints(0.5)
             .WrapFormat.Side = wdWrapRight
             .WrapFormat.AllowOverlap = False
         End With
@@ -249,30 +243,43 @@ def extract_data_by_path(data_dict, path_list):
         return "Нет данных"
 
 
-def insert_section(doc, title, level, prompt, source_path=None, page_break=False):
+async def insert_section(doc, title, level, prompt, source_path=None, page_break=False, subsections=None):
     if page_break:
         doc.add_page_break()
 
+    city = json_data.get("Общие характеристики", {}).get("Город", "Город")
+    current_date = datetime.now().strftime("%d.%m.%Y")
+    current_year = datetime.now().year
+
+    title_filled = title.format(
+        city=city, current_date=current_date, current_year=current_year)
+
     if level == 1:
-        format_text(doc, f"# {title}")
+        format_text(doc, f"# {title_filled}")
     elif level == 2:
-        format_text(doc, f"## {title}")
+        format_text(doc, f"## {title_filled}")
 
-    data = extract_data_by_path(json_data, source_path) if source_path else ""
+    if not subsections:
+        if prompt.strip():
+            data = extract_data_by_path(
+                json_data, source_path) if source_path else ""
 
-    if isinstance(data, dict) and "img_src" in data:
-        insert_image(doc, data["img_src"])
+            if isinstance(data, dict) and "img_src" in data:
+                doc.add_paragraph()
+                insert_image(doc, data["img_src"])
 
-    prompt_filled = prompt.format(
-        city=json_data.get("Общие характеристики", {}).get("Город", "Город"),
-        current_date=datetime.now().strftime("%d.%m.%Y"),
-        current_year=datetime.now().year,
-        data=data
-    )
+            prompt_filled = prompt.format(
+                city=city,
+                current_date=current_date,
+                current_year=current_year,
+                data=data
+            )
 
-    text = generate_text_gemini(prompt_filled)
-    for line in text.split("\n"):
-        format_text(doc, line)
+            text = await generate_text_gemini(prompt_filled)
+            for line in text.split("\n"):
+                format_text(doc, line)
+        else:
+            print(f"Skipping text generation for section: {title_filled}")
 
 
 def decode_image_base64(base64_str):
@@ -307,7 +314,7 @@ def insert_image(doc, img_src):
         image_path = decode_image_base64(img_src)
 
         with Image.open(image_path) as img:
-            max_width_in = 5
+            max_width_in = 4
             max_height_in = 5
 
             img_width_px, img_height_px = img.size
@@ -337,19 +344,31 @@ def insert_image(doc, img_src):
         print(f"Ошибка вставки изображения: {e}")
 
 
-def generate_text_gemini(prompt: str) -> str:
+async def generate_text_gemini(prompt: str) -> str:
+    global last_request_time
     try:
-        model = genai.GenerativeModel("gemini-2.0-flash")
-        response = model.generate_content(prompt)
-        return response.text.strip() if response.text else "Ошибка генерации текста"
+        async with semaphore:
+            now = time.monotonic()
+            wait_time = MIN_INTERVAL - (now - last_request_time)
+            if wait_time > 0:
+                await asyncio.sleep(wait_time)
+            last_request_time = time.monotonic()
+
+            model = genai.GenerativeModel("gemini-2.0-flash")
+            response = model.generate_content(prompt)
+            return response.text.strip() if response.text else "Ошибка генерации текста"
     except Exception as e:
         return f"Ошибка при генерации текста: {str(e)}"
 
 
 @app.post("/generate_report")
-async def generate_report():
+async def generate_report(request: Request):
     global json_data
-    json_data = load_json_file("input.json")
+    try:
+        json_data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Ошибка при чтении JSON.")
+
     report_structure = load_json_file("report_structure.json")
 
     city = json_data.get("Общие характеристики", {}).get("Город")
@@ -364,26 +383,36 @@ async def generate_report():
     add_page_numbers(doc)
 
     for section in report_structure:
-        insert_section(
-            doc,
-            title=section["title"],
-            level=1,
-            prompt=section.get("prompt", ""),
-            source_path=section.get("source"),
-            page_break=True
-        )
-
-        for sub in section.get("subsections", []):
-            insert_section(
+        if "subsections" not in section:
+            await insert_section(
                 doc,
-                title=sub["title"],
-                level=2,
-                prompt=sub["prompt"],
-                source_path=sub.get("source"),
-                page_break=False
+                title=section["title"],
+                level=1,
+                prompt=section.get("prompt", ""),
+                source_path=section.get("source"),
+                page_break=True
+            )
+        else:
+            await insert_section(
+                doc,
+                title=section["title"],
+                level=1,
+                prompt="",
+                source_path=None,
+                page_break=True
             )
 
-    report_path = os.path.join(REPORTS_DIR, f"report_{city}.docx")
+            for sub in section["subsections"]:
+                await insert_section(
+                    doc,
+                    title=sub["title"],
+                    level=2,
+                    prompt=sub.get("prompt", ""),
+                    source_path=sub.get("source"),
+                    page_break=False
+                )
+
+    report_path = os.path.join(REPORTS_DIR, f"Отчет_{city}.docx")
     doc.save(report_path)
     macro_report_path = add_macro_to_doc(report_path)
 

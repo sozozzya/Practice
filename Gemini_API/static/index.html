@@ -34,42 +34,62 @@
 
 <body>
     <div class="container">
-        <h1>Генерация отчета о рынке недвижимости</h1>
-
+        <input type="file" id="jsonFileInput" accept=".json" onchange="loadJson()" />
         <button onclick="generateReport()">Сформировать отчет</button>
-        <button onclick="downloadReport()">Скачать отчет</button>
-
         <p id="status"></p>
     </div>
 
     <script>
-        async function generateReport() {
-            const status = document.getElementById("status");
-            status.textContent = "Генерация отчета...";
+        function loadJson() {
+            const fileInput = document.getElementById("jsonFileInput");
+            const file = fileInput.files[0];
+            const reader = new FileReader();
 
-            try {
-                let response = await fetch("/generate_report/", { method: "POST" });
-                let result = await response.json();
+            reader.onload = function (e) {
+                sessionStorage.setItem("inputJson", e.target.result);
+                document.getElementById("status").textContent = "JSON загружен!";
+            };
 
-                if (response.ok) {
-                    status.textContent = "Отчет успешно сформирован!";
-                    window.city = result.city;
-                } else {
-                    throw new Error(result.error || "Ошибка генерации отчета");
-                }
-            } catch (error) {
-                alert(`Ошибка: ${error.message}`);
-                status.textContent = "Ошибка при генерации отчета!";
+            if (file) {
+                reader.readAsText(file);
             }
         }
 
-        function downloadReport() {
-            if (!window.city) {
-                alert("Город не выбран!");
+        async function generateReport() {
+            const status = document.getElementById("status");
+            const jsonData = sessionStorage.getItem("inputJson");
+
+            if (!jsonData) {
+                alert("Сначала загрузите JSON-файл!");
                 return;
             }
 
-            window.location.href = `/download_report/?city=${window.city}`;
+            status.textContent = "Генерация отчета...";
+
+            try {
+                const response = await fetch("/generate_report", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: jsonData
+                });
+
+                const result = await response.json();
+
+                if (response.ok) {
+                    status.textContent = "Отчет успешно сформирован!";
+                    const link = document.createElement("a");
+                    link.href = `/download_report/?city=${result.city}`;
+                    link.download = `Отчет_${result.city}.docm`;
+                    document.body.appendChild(link);
+                    link.click();
+                    link.remove();
+                } else {
+                    throw new Error(result.detail || "Ошибка генерации отчета");
+                }
+            } catch (error) {
+                status.textContent = "Ошибка при генерации отчета!";
+                alert("Ошибка: " + error.message);
+            }
         }
     </script>
 </body>
